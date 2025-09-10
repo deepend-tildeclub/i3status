@@ -38,24 +38,40 @@ static int print_eth_speed(char *outwalk, const char *interface) {
 #if defined(__linux__)
     int ethspeed = 0;
     struct ifreq ifr;
-    struct ethtool_cmd ecmd;
-
-    ecmd.cmd = ETHTOOL_GSET;
     (void)memset(&ifr, 0, sizeof(ifr));
-    ifr.ifr_data = (caddr_t)&ecmd;
     (void)strcpy(ifr.ifr_name, interface);
+
+#if defined(ETHTOOL_GLINKSETTINGS) && defined(ETHTOOL_LINK_MODE_MASK_MAX_KERNEL_NU32)
+    struct {
+        struct ethtool_link_settings req;
+        __u32 link_mode_data[3 * ETHTOOL_LINK_MODE_MASK_MAX_KERNEL_NU32];
+    } ecmd2;
+    (void)memset(&ecmd2, 0, sizeof(ecmd2));
+    ecmd2.req.cmd = ETHTOOL_GLINKSETTINGS;
+    ecmd2.req.link_mode_masks_nwords = ETHTOOL_LINK_MODE_MASK_MAX_KERNEL_NU32;
+    ifr.ifr_data = (caddr_t)&ecmd2.req;
     if (ioctl(general_socket, SIOCETHTOOL, &ifr) == 0) {
-        ethspeed = (ecmd.speed == USHRT_MAX ? 0 : ethtool_cmd_speed(&ecmd));
-        if (ethspeed == 2500) {
-            // 2.5 Gbit/s is the only case where floating point formatting is most
-            // common.
-            return sprintf(outwalk, "%.1f Gbit/s", (double)ethspeed / 1000);
-        } else if (ethspeed > 1000) {
-            return sprintf(outwalk, "%d Gbit/s", ethspeed / 1000);
+        if (ecmd2.req.speed != 0 && ecmd2.req.speed != (__u32)USHRT_MAX && ecmd2.req.speed != (__u32)SPEED_UNKNOWN) {
+            ethspeed = (int)ecmd2.req.speed;
+            return sprintf(outwalk, "%d Mbit/s", ethspeed);
+        } else {
+            return sprintf(outwalk, "?");
         }
+    }
+#endif
+
+    struct ethtool_cmd ecmd;
+    (void)memset(&ecmd, 0, sizeof(ecmd));
+    ecmd.cmd = ETHTOOL_GSET;
+    ifr.ifr_data = (caddr_t)&ecmd;
+    if (ioctl(general_socket, SIOCETHTOOL, &ifr) == 0) {
+        ethspeed = (int)ethtool_cmd_speed(&ecmd);
+        if (ecmd.speed == USHRT_MAX || ethspeed <= 0 || ethspeed == (int)SPEED_UNKNOWN)
+            return sprintf(outwalk, "?");
         return sprintf(outwalk, "%d Mbit/s", ethspeed);
-    } else
+    } else {
         return sprintf(outwalk, "?");
+    }
 #elif defined(__FreeBSD__) || defined(__FreeBSD_kernel__) || defined(__DragonFly__)
     const char *ethspeed;
     struct ifmediareq ifm;
@@ -70,8 +86,6 @@ static int print_eth_speed(char *outwalk, const char *interface) {
     if (ret < 0)
         return sprintf(outwalk, "?");
 
-    /* Get the description of the media type, partially taken from
-     * FreeBSD's ifconfig */
     const struct ifmedia_description *desc;
     static struct ifmedia_description ifm_subtype_descriptions[] =
         IFM_SUBTYPE_ETHERNET_DESCRIPTIONS;
@@ -105,10 +119,6 @@ static int print_eth_speed(char *outwalk, const char *interface) {
         IFM_SUBTYPE_DESCRIPTIONS;
 
     for (desc = ifm_subtype_descriptions; desc->ifmt_string != NULL; desc++) {
-        /*
-		 * Skip these non-informative values and go right ahead to the
-		 * actual speeds.
-		 */
         if (BEGINS_WITH(desc->ifmt_string, "autoselect") ||
             BEGINS_WITH(desc->ifmt_string, "auto"))
             continue;
@@ -144,7 +154,7 @@ static int print_eth_speed(char *outwalk, const char *interface) {
  * | 127.0.0.1    | ::1/128      | IPv4      | ok                |
  */
 void print_eth_info(eth_info_ctx_t *ctx) {
-    const char *format = ctx->format_down;  // default format
+    const char *format = ctx->format_down;
 
     char *outwalk = ctx->buf;
     size_t num = 0;
@@ -154,10 +164,6 @@ void print_eth_info(eth_info_ctx_t *ctx) {
     char *ipv4_address = sstrdup(get_ip_addr(ctx->interface, AF_INET));
     char *ipv6_address = sstrdup(get_ip_addr(ctx->interface, AF_INET6));
 
-    /*
-     * Removing '%' and following characters from IPv6 since the interface identifier is redundant,
-     * as the output already includes the interface name.
-    */
     if (ipv6_address != NULL) {
         char *prct_ptr = strstr(ipv6_address, "%");
         if (prct_ptr != NULL) {
